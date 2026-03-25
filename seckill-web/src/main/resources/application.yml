@@ -1,0 +1,25 @@
+spring:
+  application:
+    name: seckill-system
+  # 数据库配置
+  datasource:
+    url: jdbc:mysql://localhost:3306/seckill
+    username: root
+    password: Tvgai36183
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+# Swagger配置
+knife4j:
+  enable: true
+
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true
+
+# MyBatis Plus配置
+mybatis-plus:
+  mapper-locations: classpath:/mapper/*.xml
+  configuration:
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
