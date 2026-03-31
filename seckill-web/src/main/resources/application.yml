@@ -1,14 +1,18 @@
 spring:
   application:
     name: seckill-system
-  # 数据库配置
   datasource:
     url: jdbc:mysql://localhost:3306/seckill
     username: root
     password: Tvgai36183
     driver-class-name: com.mysql.cj.jdbc.Driver
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      database: 0
+      timeout: 3000ms
 
-# Swagger配置
 knife4j:
   enable: true
 
@@ -18,7 +22,6 @@ springdoc:
   swagger-ui:
     enabled: true
 
-# MyBatis Plus配置
 mybatis-plus:
   mapper-locations: classpath:/mapper/*.xml
   configuration:
