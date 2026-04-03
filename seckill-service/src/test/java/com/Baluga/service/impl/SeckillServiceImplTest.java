@@ -27,7 +27,6 @@ import java.util.Collections;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -40,6 +39,12 @@ import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class SeckillServiceImplTest {
+
+    private static final String DUPLICATE_MESSAGE = "\u8bf7\u52ff\u91cd\u590d\u4e0b\u5355";
+    private static final String SOLD_OUT_MESSAGE = "\u5df2\u552e\u7f44";
+    private static final String SUCCESS_MESSAGE = "\u79d2\u6740\u6210\u529f";
+    private static final String SYSTEM_BUSY_MESSAGE = "\u7cfb\u7edf\u7e41\u5fd9\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5";
+    private static final String FAILED_MESSAGE = "\u79d2\u6740\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5";
 
     @Mock
     private SeckillProductMapper seckillProductMapper;
@@ -84,33 +89,58 @@ class SeckillServiceImplTest {
         Result result = seckillService.doSeckill(buildDto());
 
         assertEquals(500, result.getCode());
-        assertEquals("请勿重复下单", result.getMessage());
+        assertEquals(DUPLICATE_MESSAGE, result.getMessage());
         verify(seckillProductMapper, never()).selectById(anyLong());
+        verify(stringRedisTemplate, never()).execute(
+                eq(seckillStockScript),
+                eq(Collections.singletonList("seckill:stock:1")),
+                eq("1")
+        );
     }
 
     @Test
     void doSeckillShouldReturnSoldOutWhenRedisStockDecrementFails() {
         SeckillProduct product = buildSeckillProduct();
-        when(valueOperations.get(anyString())).thenAnswer(invocation -> {
-            String key = invocation.getArgument(0);
-            if ("seckill:order:100:1".equals(key)) {
-                return null;
-            }
-            if ("seckill:product:1".equals(key)) {
-                return null;
-            }
-            return null;
-        });
-        when(seckillOrderMapper.selectOne(any())).thenReturn(null);
-        when(valueOperations.setIfAbsent("seckill:order:100:1", "PROCESSING", 5L, TimeUnit.MINUTES)).thenReturn(true);
-        when(valueOperations.setIfAbsent("seckill:stock:1", "10")).thenReturn(true);
-        when(seckillProductMapper.selectById(1L)).thenReturn(product);
-        when(stringRedisTemplate.execute(seckillStockScript, Collections.singletonList("seckill:stock:1"), "1")).thenReturn(-1L);
+        mockPendingOrderAndProductQuery(product);
+        when(stringRedisTemplate.execute(seckillStockScript, Collections.singletonList("seckill:stock:1"), "1"))
+                .thenReturn(-1L);
 
         Result result = seckillService.doSeckill(buildDto());
 
         assertEquals(500, result.getCode());
-        assertEquals("已售罄", result.getMessage());
+        assertEquals(SOLD_OUT_MESSAGE, result.getMessage());
+        verify(orderMapper, never()).insert(any(Order.class));
+        verify(seckillOrderMapper, never()).insert(any(SeckillOrder.class));
+        verify(stringRedisTemplate).delete("seckill:order:100:1");
+    }
+
+    @Test
+    void doSeckillShouldReturnSystemBusyWhenLuaReturnsInvalidStockFlag() {
+        SeckillProduct product = buildSeckillProduct();
+        mockPendingOrderAndProductQuery(product);
+        when(stringRedisTemplate.execute(seckillStockScript, Collections.singletonList("seckill:stock:1"), "1"))
+                .thenReturn(-2L);
+
+        Result result = seckillService.doSeckill(buildDto());
+
+        assertEquals(500, result.getCode());
+        assertEquals(SYSTEM_BUSY_MESSAGE, result.getMessage());
+        verify(orderMapper, never()).insert(any(Order.class));
+        verify(seckillOrderMapper, never()).insert(any(SeckillOrder.class));
+        verify(stringRedisTemplate).delete("seckill:order:100:1");
+    }
+
+    @Test
+    void doSeckillShouldReturnSystemBusyWhenLuaReturnsNull() {
+        SeckillProduct product = buildSeckillProduct();
+        mockPendingOrderAndProductQuery(product);
+        when(stringRedisTemplate.execute(seckillStockScript, Collections.singletonList("seckill:stock:1"), "1"))
+                .thenReturn(null);
+
+        Result result = seckillService.doSeckill(buildDto());
+
+        assertEquals(500, result.getCode());
+        assertEquals(SYSTEM_BUSY_MESSAGE, result.getMessage());
         verify(orderMapper, never()).insert(any(Order.class));
         verify(seckillOrderMapper, never()).insert(any(SeckillOrder.class));
         verify(stringRedisTemplate).delete("seckill:order:100:1");
@@ -119,21 +149,9 @@ class SeckillServiceImplTest {
     @Test
     void doSeckillShouldCreateOrderAfterRedisStockDeduction() {
         SeckillProduct product = buildSeckillProduct();
-        when(valueOperations.get(anyString())).thenAnswer(invocation -> {
-            String key = invocation.getArgument(0);
-            if ("seckill:order:100:1".equals(key)) {
-                return null;
-            }
-            if ("seckill:product:1".equals(key)) {
-                return null;
-            }
-            return null;
-        });
-        when(seckillOrderMapper.selectOne(any())).thenReturn(null);
-        when(valueOperations.setIfAbsent("seckill:order:100:1", "PROCESSING", 5L, TimeUnit.MINUTES)).thenReturn(true);
-        when(valueOperations.setIfAbsent("seckill:stock:1", "10")).thenReturn(true);
-        when(seckillProductMapper.selectById(1L)).thenReturn(product);
-        when(stringRedisTemplate.execute(seckillStockScript, Collections.singletonList("seckill:stock:1"), "1")).thenReturn(9L);
+        mockPendingOrderAndProductQuery(product);
+        when(stringRedisTemplate.execute(seckillStockScript, Collections.singletonList("seckill:stock:1"), "1"))
+                .thenReturn(9L);
         when(seckillProductMapper.update(any(), any())).thenReturn(1);
         when(orderMapper.insert(any(Order.class))).thenAnswer(invocation -> {
             Order order = invocation.getArgument(0);
@@ -146,7 +164,7 @@ class SeckillServiceImplTest {
 
         assertEquals(200, result.getCode());
         assertEquals("success", result.getMessage());
-        assertEquals("秒杀成功", result.getData());
+        assertEquals(SUCCESS_MESSAGE, result.getData());
         verify(valueOperations).set("seckill:order:100:1", "88");
         ArgumentCaptor<SeckillOrder> captor = ArgumentCaptor.forClass(SeckillOrder.class);
         verify(seckillOrderMapper).insert(captor.capture());
@@ -159,6 +177,21 @@ class SeckillServiceImplTest {
     void doSeckillShouldRollbackRedisWhenDatabaseStepFails() {
         SeckillProduct product = buildSeckillProduct();
         doNothing().when(seckillService).markCurrentTransactionRollbackOnly();
+        mockPendingOrderAndProductQuery(product);
+        when(stringRedisTemplate.execute(seckillStockScript, Collections.singletonList("seckill:stock:1"), "1"))
+                .thenReturn(9L);
+        when(seckillProductMapper.update(any(), any())).thenReturn(0);
+
+        Result result = seckillService.doSeckill(buildDto());
+
+        assertEquals(500, result.getCode());
+        assertEquals(FAILED_MESSAGE, result.getMessage());
+        verify(valueOperations).increment("seckill:stock:1", 1L);
+        verify(stringRedisTemplate).delete("seckill:order:100:1");
+        verify(seckillService).markCurrentTransactionRollbackOnly();
+    }
+
+    private void mockPendingOrderAndProductQuery(SeckillProduct product) {
         when(valueOperations.get(anyString())).thenAnswer(invocation -> {
             String key = invocation.getArgument(0);
             if ("seckill:order:100:1".equals(key)) {
@@ -173,17 +206,6 @@ class SeckillServiceImplTest {
         when(valueOperations.setIfAbsent("seckill:order:100:1", "PROCESSING", 5L, TimeUnit.MINUTES)).thenReturn(true);
         when(valueOperations.setIfAbsent("seckill:stock:1", "10")).thenReturn(true);
         when(seckillProductMapper.selectById(1L)).thenReturn(product);
-        when(stringRedisTemplate.execute(seckillStockScript, Collections.singletonList("seckill:stock:1"), "1")).thenReturn(9L);
-        when(seckillProductMapper.update(any(), any())).thenReturn(0);
-
-        Result result = seckillService.doSeckill(buildDto());
-
-        assertEquals(500, result.getCode());
-        assertEquals("秒杀失败，请稍后重试", result.getMessage());
-        verify(valueOperations).increment("seckill:stock:1", 1L);
-        verify(stringRedisTemplate).delete("seckill:order:100:1");
-        verify(seckillService).markCurrentTransactionRollbackOnly();
-        assertTrue(true);
     }
 
     private SeckillDTO buildDto() {
