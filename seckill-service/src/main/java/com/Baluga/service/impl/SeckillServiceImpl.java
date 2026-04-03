@@ -34,8 +34,19 @@ public class SeckillServiceImpl implements SeckillService {
     private static final String SECKILL_STOCK_KEY_PREFIX = "seckill:stock:";
     private static final String SECKILL_ORDER_KEY_PREFIX = "seckill:order:";
     private static final String ORDER_PROCESSING = "PROCESSING";
+    private static final String ORDERED = "ORDERED";
     private static final long PRODUCT_CACHE_TTL_MINUTES = 30L;
     private static final long ORDER_MARK_TTL_MINUTES = 5L;
+    private static final long LUA_STOCK_SOLD_OUT = -1L;
+    private static final long LUA_STOCK_INVALID = -2L;
+    private static final String MESSAGE_INVALID_PARAM = "\u53c2\u6570\u4e0d\u80fd\u4e3a\u7a7a";
+    private static final String MESSAGE_DUPLICATE_ORDER = "\u8bf7\u52ff\u91cd\u590d\u4e0b\u5355";
+    private static final String MESSAGE_PRODUCT_NOT_FOUND = "\u79d2\u6740\u5546\u54c1\u4e0d\u5b58\u5728";
+    private static final String MESSAGE_SECKILL_CLOSED = "\u79d2\u6740\u672a\u5f00\u59cb\u6216\u5df2\u7ed3\u675f";
+    private static final String MESSAGE_SYSTEM_BUSY = "\u7cfb\u7edf\u7e41\u5fd9\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5";
+    private static final String MESSAGE_STOCK_EMPTY = "\u5df2\u552e\u7f44";
+    private static final String MESSAGE_SECKILL_SUCCESS = "\u79d2\u6740\u6210\u529f";
+    private static final String MESSAGE_SECKILL_FAILED = "\u79d2\u6740\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5";
 
     private final SeckillProductMapper seckillProductMapper;
     private final OrderMapper orderMapper;
@@ -73,7 +84,7 @@ public class SeckillServiceImpl implements SeckillService {
     @Transactional(rollbackFor = Exception.class)
     public Result doSeckill(SeckillDTO dto) {
         if (dto == null || dto.getUserId() == null || dto.getSeckillProductId() == null) {
-            return Result.error("参数不能为空");
+            return Result.error(MESSAGE_INVALID_PARAM);
         }
 
         Long userId = dto.getUserId();
@@ -82,24 +93,24 @@ public class SeckillServiceImpl implements SeckillService {
         String stockKey = buildStockKey(seckillProductId);
 
         if (hasOrdered(userId, seckillProductId, orderKey)) {
-            return Result.error("请勿重复下单");
+            return Result.error(MESSAGE_DUPLICATE_ORDER);
         }
 
         Boolean orderLocked = stringRedisTemplate.opsForValue()
                 .setIfAbsent(orderKey, ORDER_PROCESSING, ORDER_MARK_TTL_MINUTES, TimeUnit.MINUTES);
         if (!Boolean.TRUE.equals(orderLocked)) {
-            return Result.error("请勿重复下单");
+            return Result.error(MESSAGE_DUPLICATE_ORDER);
         }
 
         boolean stockDeducted = false;
         try {
             SeckillProduct seckillProduct = getSeckillProduct(seckillProductId);
             if (seckillProduct == null) {
-                return releaseOrderMark(orderKey, "秒杀商品不存在");
+                return releaseOrderMark(orderKey, MESSAGE_PRODUCT_NOT_FOUND);
             }
 
             if (!isSeckillOpen(seckillProduct)) {
-                return releaseOrderMark(orderKey, "秒杀未开始或已结束");
+                return releaseOrderMark(orderKey, MESSAGE_SECKILL_CLOSED);
             }
 
             initStockCacheIfAbsent(seckillProduct);
@@ -108,11 +119,11 @@ public class SeckillServiceImpl implements SeckillService {
                     Collections.singletonList(stockKey),
                     "1"
             );
-            if (remainStock == null) {
-                return releaseOrderMark(orderKey, "系统繁忙，请稍后重试");
+            if (remainStock == null || remainStock == LUA_STOCK_INVALID) {
+                return releaseOrderMark(orderKey, MESSAGE_SYSTEM_BUSY);
             }
-            if (remainStock < 0) {
-                return releaseOrderMark(orderKey, "已售罄");
+            if (remainStock == LUA_STOCK_SOLD_OUT) {
+                return releaseOrderMark(orderKey, MESSAGE_STOCK_EMPTY);
             }
             stockDeducted = true;
 
@@ -140,21 +151,21 @@ public class SeckillServiceImpl implements SeckillService {
             seckillOrderMapper.insert(seckillOrder);
 
             stringRedisTemplate.opsForValue().set(orderKey, String.valueOf(order.getId()));
-            return Result.success("秒杀成功");
+            return Result.success(MESSAGE_SECKILL_SUCCESS);
         } catch (DuplicateKeyException ex) {
             if (stockDeducted) {
                 restoreRedisStock(stockKey);
             }
             markCurrentTransactionRollbackOnly();
-            stringRedisTemplate.opsForValue().set(orderKey, "ORDERED");
-            return Result.error("请勿重复下单");
+            stringRedisTemplate.opsForValue().set(orderKey, ORDERED);
+            return Result.error(MESSAGE_DUPLICATE_ORDER);
         } catch (Exception ex) {
             if (stockDeducted) {
                 restoreRedisStock(stockKey);
             }
             markCurrentTransactionRollbackOnly();
             stringRedisTemplate.delete(orderKey);
-            return Result.error("秒杀失败，请稍后重试");
+            return Result.error(MESSAGE_SECKILL_FAILED);
         }
     }
 
